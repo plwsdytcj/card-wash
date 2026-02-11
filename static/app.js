@@ -195,31 +195,116 @@ function renderAnalyze() {
 
   $('#riskSummary').textContent = analysis.summary;
 
-  // Fields list
+  // Separate main fields, lorebook entries, and alternate greetings
+  const mainFields = [];
+  const lorebookFields = [];
+  const greetingFields = [];
+  for (const f of analysis.fields) {
+    if (f.field_name.startsWith('lorebook:')) lorebookFields.push(f);
+    else if (f.field_name.startsWith('alternate_greetings[')) greetingFields.push(f);
+    else mainFields.push(f);
+  }
+
   const list = $('#fieldsList');
   list.innerHTML = '';
-  for (const f of analysis.fields) {
-    const card = document.createElement('div');
-    card.className = 'field-card';
-    const preview = getFieldValue(f.field_name);
-    card.innerHTML = `
-      <div class="field-card-header">
-        <span class="field-card-name">${f.field_name}</span>
-        <span class="field-card-risk" style="background:${riskBg(f.risk_score)};color:${riskColor(f.risk_score)}">
-          ${riskLabel(f.risk_score)}
-        </span>
-      </div>
-      <div class="field-card-preview">${escapeHtml(preview).slice(0, 120)}${preview.length > 120 ? '...' : ''}</div>
-      ${f.matches.length ? `<div class="field-card-matches">${f.matches.map(m => `<span class="match-tag">${escapeHtml(m.text)}</span>`).join('')}</div>` : ''}
-    `;
-    list.appendChild(card);
+
+  // Main fields
+  for (const f of mainFields) {
+    list.appendChild(buildFieldCard(f));
   }
+
+  // Lorebook section (collapsible)
+  if (lorebookFields.length) {
+    const lorebookRisks = lorebookFields.filter(f => f.risk_score > 0);
+    const section = document.createElement('div');
+    section.className = 'field-group';
+    section.innerHTML = `
+      <div class="field-group-header" data-toggle="lorebook">
+        <span class="field-group-toggle">▶</span>
+        <span class="field-group-title">Lorebook</span>
+        <span class="field-group-count">${lorebookFields.length} 条</span>
+        ${lorebookRisks.length
+          ? `<span class="field-group-risk" style="background:${riskBg(Math.max(...lorebookRisks.map(f=>f.risk_score)))};color:${riskColor(Math.max(...lorebookRisks.map(f=>f.risk_score)))}">${lorebookRisks.length} 条有风险</span>`
+          : `<span class="field-group-risk" style="background:var(--success-dim);color:var(--success)">安全</span>`
+        }
+      </div>
+      <div class="field-group-body" id="lorebookGroup" style="display:none"></div>
+    `;
+    list.appendChild(section);
+
+    const body = section.querySelector('.field-group-body');
+    for (const f of lorebookFields) {
+      body.appendChild(buildFieldCard(f));
+    }
+
+    section.querySelector('.field-group-header').addEventListener('click', () => {
+      const expanded = body.style.display !== 'none';
+      body.style.display = expanded ? 'none' : 'flex';
+      section.querySelector('.field-group-toggle').textContent = expanded ? '▶' : '▼';
+    });
+  }
+
+  // Alternate greetings section (collapsible)
+  if (greetingFields.length) {
+    const section = document.createElement('div');
+    section.className = 'field-group';
+    section.innerHTML = `
+      <div class="field-group-header" data-toggle="greetings">
+        <span class="field-group-toggle">▶</span>
+        <span class="field-group-title">Alternate Greetings</span>
+        <span class="field-group-count">${greetingFields.length} 条</span>
+      </div>
+      <div class="field-group-body" id="greetingsGroup" style="display:none"></div>
+    `;
+    list.appendChild(section);
+
+    const body = section.querySelector('.field-group-body');
+    for (const f of greetingFields) {
+      body.appendChild(buildFieldCard(f));
+    }
+
+    section.querySelector('.field-group-header').addEventListener('click', () => {
+      const expanded = body.style.display !== 'none';
+      body.style.display = expanded ? 'none' : 'flex';
+      section.querySelector('.field-group-toggle').textContent = expanded ? '▶' : '▼';
+    });
+  }
+}
+
+function buildFieldCard(f) {
+  const el = document.createElement('div');
+  el.className = 'field-card';
+  const preview = getFieldValue(f.field_name);
+  el.innerHTML = `
+    <div class="field-card-header">
+      <span class="field-card-name">${f.field_name}</span>
+      <span class="field-card-risk" style="background:${riskBg(f.risk_score)};color:${riskColor(f.risk_score)}">
+        ${riskLabel(f.risk_score)}
+      </span>
+    </div>
+    ${preview ? `<div class="field-card-preview">${escapeHtml(preview).slice(0, 150)}${preview.length > 150 ? '...' : ''}</div>` : ''}
+    ${f.matches.length ? `<div class="field-card-matches">${f.matches.map(m => `<span class="match-tag">${escapeHtml(m.text)}</span>`).join('')}</div>` : ''}
+  `;
+  return el;
 }
 
 function getFieldValue(fieldName) {
   const d = state.card.data;
-  // Handle lorebook and alternate_greetings
-  if (fieldName.startsWith('lorebook:')) return '[Lorebook Entry]';
+  // Handle lorebook entries — show actual content
+  if (fieldName.startsWith('lorebook:')) {
+    const book = d.character_book;
+    if (!book || !book.entries) return '';
+    // Parse the entry identifier (name or id)
+    const key = fieldName.replace('lorebook:', '');
+    const entry = book.entries.find(e =>
+      (e.name && e.name === key) || String(e.id) === key
+    ) || book.entries[parseInt(key)] || null;
+    if (!entry) return '';
+    const parts = [];
+    if (entry.keys && entry.keys.length) parts.push(`[${entry.keys.join(', ')}]`);
+    if (entry.content) parts.push(entry.content);
+    return parts.join(' ') || '';
+  }
   if (fieldName.startsWith('alternate_greetings[')) {
     const idx = parseInt(fieldName.match(/\[(\d+)\]/)?.[1] || '0');
     return (d.alternate_greetings || [])[idx] || '';
