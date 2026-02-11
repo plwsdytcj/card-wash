@@ -33,6 +33,7 @@ from rewriter import (
     RewriteStrength,
     apply_rewrite,
     rewrite_card,
+    translate_card,
 )
 
 
@@ -128,15 +129,66 @@ def _write_output(
     original_path: Path,
     output_dir: Path,
     output_format: str,
+    suffix: str = "_washed",
 ):
     stem = original_path.stem
     if output_format == "png" and original_path.suffix.lower() == ".png":
-        out_path = output_dir / f"{stem}_washed.png"
+        out_path = output_dir / f"{stem}{suffix}.png"
         out_bytes = write_card_to_png(card, original_bytes)
     else:
-        out_path = output_dir / f"{stem}_washed.json"
+        out_path = output_dir / f"{stem}{suffix}.json"
         out_bytes = write_card_to_json(card)
     out_path.write_bytes(out_bytes)
+
+
+async def translate_one(
+    filepath: Path,
+    output_dir: Path,
+    config: LLMConfig,
+    target_lang: str,
+    selected_fields: list[str] | None,
+    output_format: str,
+) -> dict:
+    """Translate a single card file. Returns a result dict."""
+    result = {
+        "file": filepath.name,
+        "status": "ok",
+        "source_lang": "",
+        "target_lang": target_lang,
+        "fields_translated": 0,
+        "error": "",
+    }
+
+    try:
+        file_bytes = filepath.read_bytes()
+        card = read_card(file_bytes, filepath.name)
+
+        # Detect source language
+        from analyzer import detect_language as _detect_lang
+        lang_sample = " ".join(
+            v for k, v in card.get_rewritable_fields().items()
+            if k in ("description", "personality", "scenario", "first_mes")
+        )
+        source_lang = _detect_lang(lang_sample)
+        result["source_lang"] = source_lang
+
+        if source_lang == target_lang:
+            result["status"] = "skipped"
+            _write_output(card, file_bytes, filepath, output_dir, output_format, "_translated")
+            return result
+
+        tr = await translate_card(card, source_lang, target_lang, config, selected_fields)
+        if tr["translated"]:
+            apply_rewrite(card, tr["translated"])
+            result["fields_translated"] = len(tr["translated"])
+
+        _write_output(card, file_bytes, filepath, output_dir, output_format, "_translated")
+
+    except Exception as e:
+        result["status"] = "error"
+        result["error"] = str(e)
+
+    return result
 
 
 async def batch_process(args: argparse.Namespace):
@@ -271,6 +323,107 @@ async def batch_process(args: argparse.Namespace):
     print()
 
 
+async def batch_translate(args: argparse.Namespace):
+    """Batch translate mode."""
+    input_dir = Path(args.input_dir)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    target_lang = args.translate.strip().lower()
+    if target_lang not in ("zh", "en", "ja"):
+        print(f"{C.RED}  ✗ 不支持的目标语言: {target_lang}，请使用 zh / en / ja{C.RESET}")
+        return
+
+    lang_names = {"zh": "中文", "en": "English", "ja": "日本語"}
+
+    files = sorted([
+        f for f in input_dir.iterdir()
+        if f.suffix.lower() in (".png", ".webp", ".charx", ".json")
+        and not f.name.startswith(".")
+    ])
+
+    if not files:
+        log("!", f"在 {input_dir} 中没有找到角色卡文件", C.YELLOW)
+        return
+
+    header(f"Card Wash 批量翻译 — {len(files)} 个文件 → {lang_names[target_lang]}")
+
+    try:
+        provider = LLMProvider(args.provider)
+    except ValueError:
+        provider = LLMProvider.OPENAI_COMPATIBLE
+
+    config = LLMConfig(
+        provider=provider,
+        api_key=args.api_key,
+        model=args.model,
+        base_url=args.base_url,
+        temperature=0.3,  # lower for translation
+    )
+
+    selected_fields = (
+        [f.strip() for f in args.fields.split(",") if f.strip()]
+        if args.fields
+        else None
+    )
+
+    log("⚙", f"提供商: {provider.value}  模型: {args.model}", C.DIM)
+    log("⚙", f"目标语言: {lang_names[target_lang]}", C.DIM)
+    log("⚙", f"输出目录: {output_dir}", C.DIM)
+    print()
+
+    results = []
+    total = len(files)
+    t0 = time.time()
+
+    for i, fp in enumerate(files, 1):
+        prefix = f"[{i}/{total}]"
+
+        # Check existing
+        translated_json = output_dir / f"{fp.stem}_translated.json"
+        translated_png = output_dir / f"{fp.stem}_translated.png"
+        if not args.force and (translated_json.exists() or translated_png.exists()):
+            log("→", f"{prefix} {C.DIM}{fp.name} — 已存在，跳过{C.RESET}")
+            results.append({
+                "file": fp.name, "status": "exists",
+                "source_lang": "", "target_lang": target_lang,
+                "fields_translated": 0, "error": "",
+            })
+            continue
+
+        log("▶", f"{prefix} {fp.name} ...", C.BLUE)
+
+        res = await translate_one(fp, output_dir, config, target_lang, selected_fields, args.format)
+        results.append(res)
+
+        src_name = lang_names.get(res.get("source_lang", ""), "?")
+        if res["status"] == "ok":
+            log("✓", f"{prefix} {fp.name}  {src_name} → {lang_names[target_lang]}  翻译 {res['fields_translated']} 个字段", C.GREEN)
+        elif res["status"] == "skipped":
+            log("○", f"{prefix} {fp.name}  已经是 {lang_names[target_lang]}，跳过", C.DIM)
+        elif res["status"] == "error":
+            log("✗", f"{prefix} {fp.name}  {C.RED}错误: {res['error']}{C.RESET}", C.RED)
+
+        if i < total and res["status"] == "ok":
+            await asyncio.sleep(args.delay)
+
+    elapsed = time.time() - t0
+    header("翻译完成")
+
+    ok_count = sum(1 for r in results if r["status"] == "ok")
+    skip_count = sum(1 for r in results if r["status"] in ("skipped", "exists"))
+    err_count = sum(1 for r in results if r["status"] == "error")
+
+    log("📊", f"总计: {total} 个文件")
+    log("✓", f"成功翻译: {C.GREEN}{ok_count}{C.RESET}")
+    log("○", f"跳过: {C.DIM}{skip_count}{C.RESET}")
+    if err_count:
+        log("✗", f"错误: {C.RED}{err_count}{C.RESET}")
+    log("⏱", f"耗时: {elapsed:.1f}s")
+    log("📁", f"输出目录: {output_dir}")
+    print()
+
+
 # ── CLI ───────────────────────────────────────────────────────────────────
 
 def main():
@@ -308,13 +461,17 @@ def main():
     parser.add_argument("--delay", type=float, default=1.0, help="每个文件之间的延迟秒数 (默认: 1.0)")
     parser.add_argument("--force", action="store_true", help="强制覆盖已存在的输出文件")
     parser.add_argument("--force-rewrite", action="store_true", help="强制清洗所有卡（即使风险评分为 0）")
+    parser.add_argument("--translate", default="", metavar="LANG", help="翻译模式: 目标语言 zh/en/ja (例: --translate en)")
 
     args = parser.parse_args()
 
     if args.format == "same":
         args.format = "png"  # default to png, will auto-detect per file
 
-    asyncio.run(batch_process(args))
+    if args.translate:
+        asyncio.run(batch_translate(args))
+    else:
+        asyncio.run(batch_process(args))
 
 
 if __name__ == "__main__":

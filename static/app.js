@@ -951,3 +951,104 @@ $('#batchStartOver').addEventListener('click', () => {
   $('#batchQueue').style.display = 'none';
   $('#batchUploadZone').style.display = '';
 });
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  TRANSLATE MODE
+// ═══════════════════════════════════════════════════════════════════════════
+
+const LANG_DISPLAY = { zh: '中文', en: 'English', ja: '日本語' };
+
+$('#goToTranslate').addEventListener('click', () => {
+  const modal = $('#translateModal');
+  const detected = state.analysis?.detected_language || 'zh';
+
+  // Set source language display
+  $('#translateFromLang').textContent = LANG_DISPLAY[detected] || detected;
+
+  // Set target options — remove source lang from choices
+  const sel = $('#translateTargetLang');
+  sel.innerHTML = '';
+  for (const [code, name] of Object.entries(LANG_DISPLAY)) {
+    if (code !== detected) {
+      const opt = document.createElement('option');
+      opt.value = code;
+      opt.textContent = name;
+      sel.appendChild(opt);
+    }
+  }
+
+  // Auto-fill from server config
+  const tprov = $('#translateProvider');
+  const tmodel = $('#translateModel');
+  const tbase = $('#translateBaseUrl');
+  const tkey = $('#translateApiKey');
+  // Inherit from single-mode fields if filled
+  if ($('#llmProvider').value) tprov.value = $('#llmProvider').value;
+  if ($('#llmModel').value) tmodel.value = tmodel.value || $('#llmModel').value;
+  if ($('#llmBaseUrl').value) tbase.value = tbase.value || $('#llmBaseUrl').value;
+  if ($('#llmApiKey').value) tkey.value = tkey.value || $('#llmApiKey').value;
+
+  modal.style.display = 'flex';
+});
+
+$('#translateCancel').addEventListener('click', () => {
+  $('#translateModal').style.display = 'none';
+});
+
+$('#translateModal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) $('#translateModal').style.display = 'none';
+});
+
+$('#translateProvider').addEventListener('change', (e) => {
+  $('#translateBaseUrlGroup').style.display = e.target.value === 'openai_compatible' ? 'block' : 'none';
+});
+
+$('#translateStart').addEventListener('click', startTranslate);
+
+async function startTranslate() {
+  const targetLang = $('#translateTargetLang').value;
+
+  const form = new FormData();
+  form.append('session_id', state.sessionId);
+  form.append('provider', $('#translateProvider').value);
+  form.append('api_key', $('#translateApiKey').value.trim());
+  form.append('model', $('#translateModel').value.trim());
+  form.append('base_url', $('#translateBaseUrl')?.value || '');
+  form.append('target_lang', targetLang);
+  form.append('selected_fields', '');  // all fields
+  form.append('temperature', '0.3');
+
+  $('#translateStart').disabled = true;
+  $('#translateLoading').style.display = 'flex';
+
+  try {
+    const res = await fetch(`${API}/api/translate`, { method: 'POST', body: form });
+    if (!res.ok) {
+      const err = await res.json();
+      throw new Error(err.detail || res.statusText);
+    }
+    const data = await res.json();
+
+    // Apply translated fields as if they were rewritten
+    state.rewriteResult = {
+      original: data.original,
+      rewritten: data.translated,
+    };
+    state.acceptedFields = {};
+    for (const key of Object.keys(data.translated)) {
+      state.acceptedFields[key] = 'accept';
+    }
+
+    // Close modal, go to rewrite page to show diff
+    $('#translateModal').style.display = 'none';
+    renderDiff();
+    goToPage('rewrite');
+    toast(`翻译完成！${LANG_DISPLAY[data.source_lang]} → ${LANG_DISPLAY[data.target_lang]}`, 'success');
+  } catch (e) {
+    toast(`翻译失败: ${e.message}`, 'error');
+  } finally {
+    $('#translateStart').disabled = false;
+    $('#translateLoading').style.display = 'none';
+  }
+}

@@ -41,6 +41,7 @@ from rewriter import (
     RewriteStrength,
     apply_rewrite,
     rewrite_card,
+    translate_card,
 )
 
 app = FastAPI(title="Card Wash", version="0.1.0")
@@ -189,6 +190,72 @@ async def rewrite_card_endpoint(
     # Store rewrite result in session
     session["last_rewrite"] = result
 
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Translate
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@app.post("/api/translate")
+async def translate_card_endpoint(
+    session_id: str = Form(...),
+    provider: str = Form(""),
+    api_key: str = Form(""),
+    model: str = Form(""),
+    base_url: Optional[str] = Form(None),
+    target_lang: str = Form(...),      # "zh", "en", "ja"
+    selected_fields: str = Form(""),   # comma-separated, empty = all
+    temperature: float = Form(0.3),    # lower default for translation
+):
+    """Translate card fields to a different language."""
+    session = _sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found. Upload a card first.")
+
+    card: CharacterCard = session["card"]
+
+    # Fall back to env defaults
+    actual_provider = provider or _DEFAULT_PROVIDER or "openai"
+    actual_key = api_key or _DEFAULT_API_KEY
+    actual_model = model or _DEFAULT_MODEL or "gpt-4o-mini"
+    actual_base_url = base_url or _DEFAULT_BASE_URL or None
+
+    if not actual_key:
+        raise HTTPException(status_code=400, detail="No API key provided and no default key configured.")
+
+    try:
+        llm_provider = LLMProvider(actual_provider)
+    except ValueError:
+        llm_provider = LLMProvider.OPENAI_COMPATIBLE
+
+    config = LLMConfig(
+        provider=llm_provider,
+        api_key=actual_key,
+        model=actual_model,
+        base_url=actual_base_url,
+        temperature=temperature,
+    )
+
+    source_lang = session.get("detected_language", "en")
+    if target_lang not in ("zh", "en", "ja"):
+        raise HTTPException(status_code=400, detail="target_lang must be one of: zh, en, ja")
+    if target_lang == source_lang:
+        raise HTTPException(status_code=400, detail=f"Source and target language are both '{target_lang}'.")
+
+    fields_list = (
+        [f.strip() for f in selected_fields.split(",") if f.strip()]
+        if selected_fields
+        else None
+    )
+
+    try:
+        result = await translate_card(card, source_lang, target_lang, config, fields_list)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Translation failed: {e}")
+
+    session["last_translate"] = result
     return result
 
 

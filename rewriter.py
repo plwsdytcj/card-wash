@@ -269,3 +269,109 @@ def apply_rewrite(card: CharacterCard, rewritten_fields: dict[str, str]) -> Char
         if hasattr(card.data, field_name):
             setattr(card.data, field_name, new_value)
     return card
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Translation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_LANG_NAMES = {"zh": "中文", "en": "English", "ja": "日本語"}
+
+_TRANSLATE_SYSTEM = """\
+You are an expert translator specializing in AI roleplay character cards. \
+Your job is to translate character card fields from one language to another \
+while preserving the character's personality, tone, and all formatting. \
+You MUST output valid JSON and nothing else.
+
+RULES:
+1. Translate ALL text content naturally — not word-by-word literal translation.
+2. Adapt names to feel natural in the target language:
+   - Chinese names → keep or transliterate appropriately for target language.
+   - Japanese names → keep original or romanize depending on target language norms.
+   - English names → transliterate naturally into target language.
+3. Preserve {{user}}, {{char}}, and any other macros/placeholders EXACTLY as-is.
+4. Keep all HTML tags, XML-like tags (e.g. <CoreIdentity>), and formatting intact.
+5. Maintain the same length, level of detail, and writing quality.
+6. Do NOT add disclaimers, translator notes, or commentary.
+7. Dialogue and speech patterns should feel native in the target language, not translated.
+8. Output a JSON object with the same field keys as the input."""
+
+
+def _build_translate_prompt(
+    fields: dict[str, str],
+    source_lang: str,
+    target_lang: str,
+) -> str:
+    src_name = _LANG_NAMES.get(source_lang, source_lang)
+    tgt_name = _LANG_NAMES.get(target_lang, target_lang)
+    fields_json = json.dumps(fields, ensure_ascii=False, indent=2)
+    return f"""Translate the following character card fields from {src_name} to {tgt_name}.
+
+The translation should read as if the card was originally written in {tgt_name}. \
+Adapt cultural references, idioms, and speech patterns to feel native.
+
+Return a JSON object with the same keys, where each value is the translated version.
+
+```json
+{fields_json}
+```"""
+
+
+async def translate_fields(
+    fields: dict[str, str],
+    source_lang: str,
+    target_lang: str,
+    config: LLMConfig,
+) -> dict[str, str]:
+    """
+    Translate fields from *source_lang* to *target_lang* using the configured LLM.
+
+    Supported languages: ``"zh"``, ``"en"``, ``"ja"``.
+    """
+    system = _TRANSLATE_SYSTEM
+    user = _build_translate_prompt(fields, source_lang, target_lang)
+
+    raw_response = await _call_llm(config, system, user)
+    translated = _extract_json(raw_response)
+
+    result: dict[str, str] = {}
+    for key in fields:
+        result[key] = translated.get(key, fields[key])
+    return result
+
+
+async def translate_card(
+    card: CharacterCard,
+    source_lang: str,
+    target_lang: str,
+    config: LLMConfig,
+    selected_fields: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """
+    Translate the card and return a diff-friendly result.
+
+    Returns::
+
+        {
+            "original": {field: old_value, ...},
+            "translated": {field: new_value, ...},
+            "source_lang": "zh",
+            "target_lang": "en",
+        }
+    """
+    all_fields = card.get_rewritable_fields()
+    if selected_fields:
+        fields = {k: v for k, v in all_fields.items() if k in selected_fields}
+    else:
+        fields = all_fields
+
+    if not fields:
+        return {"original": {}, "translated": {}, "source_lang": source_lang, "target_lang": target_lang}
+
+    translated = await translate_fields(fields, source_lang, target_lang, config)
+    return {
+        "original": fields,
+        "translated": translated,
+        "source_lang": source_lang,
+        "target_lang": target_lang,
+    }
