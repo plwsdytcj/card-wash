@@ -4,6 +4,40 @@
 
 const API = '';  // same origin
 
+// Load server-side default config (env vars)
+(async function loadDefaults() {
+  try {
+    const res = await fetch(`${API}/api/config`);
+    if (!res.ok) return;
+    const cfg = await res.json();
+    if (cfg.provider) {
+      const sel = document.getElementById('llmProvider');
+      if (sel) { sel.value = cfg.provider; sel.dispatchEvent(new Event('change')); }
+      const bsel = document.getElementById('batchProvider');
+      if (bsel) { bsel.value = cfg.provider; bsel.dispatchEvent(new Event('change')); }
+    }
+    if (cfg.model) {
+      const m = document.getElementById('llmModel');
+      if (m) m.value = cfg.model;
+      const bm = document.getElementById('batchModel');
+      if (bm) bm.value = cfg.model;
+    }
+    if (cfg.base_url) {
+      const bu = document.getElementById('llmBaseUrl');
+      if (bu) bu.value = cfg.base_url;
+      const bbu = document.getElementById('batchBaseUrl');
+      if (bbu) bbu.value = cfg.base_url;
+    }
+    if (cfg.has_key) {
+      // Server has a default key — show placeholder
+      const k = document.getElementById('llmApiKey');
+      if (k) k.placeholder = '已配置服务端默认 Key';
+      const bk = document.getElementById('batchApiKey');
+      if (bk) bk.placeholder = '已配置服务端默认 Key';
+    }
+  } catch (_) {}
+})();
+
 // ── State ────────────────────────────────────────────────────────────────
 let state = {
   sessionId: null,
@@ -404,10 +438,8 @@ $('#startRewrite').addEventListener('click', startRewrite);
 
 async function startRewrite() {
   const apiKey = $('#llmApiKey').value.trim();
-  if (!apiKey) {
-    toast('请输入 API Key', 'error');
-    return;
-  }
+  // Allow empty key if server has a default configured
+  // (server will reject if neither is set)
 
   const selectedFields = [...$$('#fieldCheckboxes input:checked')].map(cb => cb.value);
   if (!selectedFields.length) {
@@ -781,10 +813,6 @@ $('#startBatchRewrite').addEventListener('click', startBatchRewrite);
 
 async function startBatchRewrite() {
   const apiKey = $('#batchApiKey').value.trim();
-  if (!apiKey) {
-    toast('请输入 API Key', 'error');
-    return;
-  }
 
   const form = new FormData();
   form.append('batch_id', batchState.batchId);

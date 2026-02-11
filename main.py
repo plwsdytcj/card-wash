@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import uuid
 import zipfile
 from typing import Any, Optional
@@ -50,6 +51,26 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── Default LLM config from environment variables ────────────────────────────
+# Set these in Vercel / Railway / .env so users don't have to enter them.
+
+_DEFAULT_PROVIDER = os.getenv("LLM_PROVIDER", "")        # e.g. "openai_compatible"
+_DEFAULT_API_KEY = os.getenv("LLM_API_KEY", "")           # e.g. "sk-or-v1-..."
+_DEFAULT_MODEL = os.getenv("LLM_MODEL", "")               # e.g. "google/gemini-2.0-flash-001"
+_DEFAULT_BASE_URL = os.getenv("LLM_BASE_URL", "")         # e.g. "https://openrouter.ai/api/v1"
+
+
+@app.get("/api/config")
+async def get_config():
+    """Return default LLM config (from env vars). Keys are masked for safety."""
+    return {
+        "provider": _DEFAULT_PROVIDER,
+        "model": _DEFAULT_MODEL,
+        "base_url": _DEFAULT_BASE_URL,
+        "has_key": bool(_DEFAULT_API_KEY),
+    }
+
 
 # ── In-memory session store (card + original PNG bytes) ──────────────────────
 
@@ -109,9 +130,9 @@ async def upload_card(file: UploadFile = File(...)):
 @app.post("/api/rewrite")
 async def rewrite_card_endpoint(
     session_id: str = Form(...),
-    provider: str = Form("openai"),
-    api_key: str = Form(...),
-    model: str = Form("gpt-4o-mini"),
+    provider: str = Form(""),
+    api_key: str = Form(""),
+    model: str = Form(""),
     base_url: Optional[str] = Form(None),
     strength: str = Form("medium"),
     selected_fields: str = Form(""),  # comma-separated
@@ -124,17 +145,26 @@ async def rewrite_card_endpoint(
 
     card: CharacterCard = session["card"]
 
+    # Fall back to env defaults
+    actual_provider = provider or _DEFAULT_PROVIDER or "openai"
+    actual_key = api_key or _DEFAULT_API_KEY
+    actual_model = model or _DEFAULT_MODEL or "gpt-4o-mini"
+    actual_base_url = base_url or _DEFAULT_BASE_URL or None
+
+    if not actual_key:
+        raise HTTPException(status_code=400, detail="No API key provided and no default key configured.")
+
     # Parse config
     try:
-        llm_provider = LLMProvider(provider)
+        llm_provider = LLMProvider(actual_provider)
     except ValueError:
         llm_provider = LLMProvider.OPENAI_COMPATIBLE
 
     config = LLMConfig(
         provider=llm_provider,
-        api_key=api_key,
-        model=model,
-        base_url=base_url if base_url else None,
+        api_key=actual_key,
+        model=actual_model,
+        base_url=actual_base_url,
         temperature=temperature,
     )
 
@@ -322,9 +352,9 @@ async def batch_upload(files: list[UploadFile] = File(...)):
 @app.post("/api/batch/rewrite")
 async def batch_rewrite(
     batch_id: str = Form(...),
-    provider: str = Form("openai"),
-    api_key: str = Form(...),
-    model: str = Form("gpt-4o-mini"),
+    provider: str = Form(""),
+    api_key: str = Form(""),
+    model: str = Form(""),
     base_url: Optional[str] = Form(None),
     strength: str = Form("medium"),
     selected_fields: str = Form(""),
@@ -336,16 +366,25 @@ async def batch_rewrite(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found.")
 
+    # Fall back to env defaults
+    actual_provider = provider or _DEFAULT_PROVIDER or "openai"
+    actual_key = api_key or _DEFAULT_API_KEY
+    actual_model = model or _DEFAULT_MODEL or "gpt-4o-mini"
+    actual_base_url = base_url or _DEFAULT_BASE_URL or None
+
+    if not actual_key:
+        raise HTTPException(status_code=400, detail="No API key provided and no default key configured.")
+
     try:
-        llm_provider = LLMProvider(provider)
+        llm_provider = LLMProvider(actual_provider)
     except ValueError:
         llm_provider = LLMProvider.OPENAI_COMPATIBLE
 
     config = LLMConfig(
         provider=llm_provider,
-        api_key=api_key,
-        model=model,
-        base_url=base_url if base_url else None,
+        api_key=actual_key,
+        model=actual_model,
+        base_url=actual_base_url,
         temperature=temperature,
     )
     try:
