@@ -50,18 +50,22 @@ class LLMConfig:
 
 _SYSTEM_PROMPT = """\
 You are an expert character card editor for AI roleplay. Your job is to \
-rewrite character card fields to remove copyrighted material while preserving \
-the essence of the character. You MUST output valid JSON and nothing else.
+rewrite character card fields so the result is an original work — not a copy \
+of the source material. You MUST output valid JSON and nothing else.
 
 RULES:
 1. Preserve the character's core personality traits, speaking style, and \
    interaction patterns.
-2. Replace all copyrighted names, places, organizations, and lore with \
-   original alternatives that feel natural.
-3. Keep the same tone, length, and formatting as the original.
+2. Replace ALL names (characters, places, organizations) with original \
+   alternatives that feel natural in the same cultural context.
+3. Rewrite descriptions, dialogue, and narration using different wording. \
+   Keep the same tone, length, and formatting, but the text must NOT be \
+   identical or near-identical to the input.
 4. Do NOT add disclaimers, notes, or commentary.
 5. If the field uses {{user}} or {{char}} macros, keep them as-is.
 6. Output a JSON object with the same field keys as the input.
+7. IMPORTANT: Every field you receive MUST be meaningfully changed. \
+   Do NOT return the original text unchanged for any field.
 """
 
 _STRENGTH_INSTRUCTIONS = {
@@ -72,10 +76,18 @@ REWRITE STRENGTH: LIGHT
 - Minimal changes — just enough to avoid direct name matches.""",
     RewriteStrength.MEDIUM: """\
 REWRITE STRENGTH: MEDIUM
-- Replace all character names, place names, organization names, and world-specific terms.
-- Adapt the background story to remove franchise connections while keeping the same narrative arc.
-- Preserve personality traits, speaking style, and relationship dynamics exactly.
-- The character should feel like a spiritual successor, not a copy.""",
+- Replace ALL character names with new original names that fit the same cultural setting.
+- Replace ALL place names, organization names, and world-specific terms with original alternatives.
+- Rewrite the background story and scenario descriptions — keep the same narrative arc \
+and emotional tone, but change enough details (locations, events, relationships) so \
+the text reads as a distinct original work.
+- Rewrite dialogue and narration to use different wording while preserving the same \
+personality, speaking style, and atmosphere.
+- Preserve personality traits and relationship dynamics exactly.
+- The result should feel like a spiritual successor — clearly inspired by but legally \
+distinct from the original. A reader familiar with the original should NOT be able to \
+match them by text comparison.
+- You MUST make meaningful changes to EVERY field. Do NOT return the original text unchanged.""",
     RewriteStrength.HEAVY: """\
 REWRITE STRENGTH: HEAVY
 - Fully transform into an original character.
@@ -374,4 +386,102 @@ async def translate_card(
         "translated": translated,
         "source_lang": source_lang,
         "target_lang": target_lang,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Classification
+# ═══════════════════════════════════════════════════════════════════════════════
+
+CARD_CATEGORIES = [
+    "纯爱",    # Romance / Pure love
+    "冒险",    # Adventure
+    "奇幻",    # Fantasy
+    "科幻",    # Sci-Fi
+    "恐怖",    # Horror
+    "悬疑",    # Mystery / Thriller
+    "日常",    # Slice of Life
+    "喜剧",    # Comedy
+    "战斗",    # Action / Combat
+    "历史",    # Historical
+    "校园",    # School
+    "后宫",    # Harem
+    "R18",     # NSFW / Adult
+    "治愈",    # Healing / Comfort
+    "黑暗",    # Dark / Grimdark
+    "其他",    # Other
+]
+
+_CLASSIFY_SYSTEM = """\
+You are an expert at categorizing AI roleplay character cards by genre/theme. \
+Analyze the character card content and assign ONE primary category and up to TWO \
+secondary categories. You MUST output valid JSON and nothing else.
+
+Available categories:
+""" + "\n".join(f"- {c}" for c in CARD_CATEGORIES) + """
+
+RULES:
+1. Always pick exactly ONE primary category that best fits the card.
+2. Pick 0-2 secondary categories if applicable. Do NOT repeat the primary.
+3. If the card has explicit sexual content or is clearly adult-oriented, include "R18" \
+   as either primary or secondary.
+4. Output format: {"primary": "类别", "secondary": ["类别1"], "reason": "一句话理由"}
+5. Do NOT add any other text or commentary outside the JSON."""
+
+
+def _build_classify_prompt(fields: dict[str, str]) -> str:
+    # Use a subset of fields for classification (no need for full lorebook)
+    preview = {}
+    for key in ("name", "description", "personality", "scenario", "first_mes",
+                "mes_example", "system_prompt"):
+        if key in fields and fields[key]:
+            # Truncate long fields to save tokens
+            val = fields[key]
+            preview[key] = val[:600] if len(val) > 600 else val
+    fields_json = json.dumps(preview, ensure_ascii=False, indent=2)
+    return f"""Classify the following character card into one of the predefined categories.
+
+```json
+{fields_json}
+```"""
+
+
+async def classify_card(
+    card: CharacterCard,
+    config: LLMConfig,
+) -> dict[str, Any]:
+    """
+    Classify a character card by genre/theme.
+
+    Returns::
+
+        {
+            "primary": "纯爱",
+            "secondary": ["奇幻"],
+            "reason": "..."
+        }
+    """
+    fields = card.get_rewritable_fields()
+    if not fields:
+        return {"primary": "其他", "secondary": [], "reason": "No content to classify"}
+
+    system = _CLASSIFY_SYSTEM
+    user = _build_classify_prompt(fields)
+
+    raw = await _call_llm(config, system, user)
+    try:
+        result = _extract_json(raw)
+    except (json.JSONDecodeError, Exception):
+        return {"primary": "其他", "secondary": [], "reason": "Classification failed"}
+
+    # Validate
+    primary = result.get("primary", "其他")
+    if primary not in CARD_CATEGORIES:
+        primary = "其他"
+    secondary = [s for s in result.get("secondary", []) if s in CARD_CATEGORIES and s != primary]
+
+    return {
+        "primary": primary,
+        "secondary": secondary[:2],
+        "reason": result.get("reason", ""),
     }

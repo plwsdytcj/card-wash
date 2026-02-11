@@ -58,11 +58,13 @@ def write_card_to_png(card: CharacterCard, original_png: bytes) -> bytes:
     """
     Inject the card JSON back into *original_png* using card-forge.
 
-    Writes both ``ccv3`` (v3) and ``chara`` (v2 legacy) tEXt chunks via
-    card-forge's ``embed_card_data(legacy=True)``.
+    Preserves the original card spec version:
+    - V3 cards → ``ccv3`` chunk (+ ``chara`` legacy fallback)
+    - V2 cards → ``chara`` chunk (+ ``ccv3`` for forward compat)
     """
-    v2_dict = card.to_v2_dict()
-    metadata_json = json.dumps(v2_dict, ensure_ascii=False)
+    # Preserve original spec version
+    native_dict = card.to_native_dict()
+    metadata_json = json.dumps(native_dict, ensure_ascii=False)
 
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as src:
         src.write(original_png)
@@ -71,6 +73,7 @@ def write_card_to_png(card: CharacterCard, original_png: bytes) -> bytes:
     out_path = src_path + "_out.png"
 
     try:
+        # Always write both ccv3 + chara for maximum compatibility
         embed_card_data(metadata_json, src_path, out_path, legacy=True)
         result = Path(out_path).read_bytes()
     finally:

@@ -32,6 +32,7 @@ from rewriter import (
     LLMProvider,
     RewriteStrength,
     apply_rewrite,
+    classify_card,
     rewrite_card,
     translate_card,
 )
@@ -71,6 +72,7 @@ async def process_one(
     selected_fields: list[str] | None,
     output_format: str,
     force_rewrite: bool = False,
+    categorize: bool = False,
 ) -> dict:
     """Process a single card file. Returns a result dict."""
     result = {
@@ -79,12 +81,24 @@ async def process_one(
         "risk_before": 0,
         "risk_after": 0,
         "fields_rewritten": 0,
+        "category": "",
         "error": "",
     }
 
     try:
         file_bytes = filepath.read_bytes()
         card = read_card(file_bytes, filepath.name)
+
+        # Classify if requested
+        category_subdir = ""
+        if categorize:
+            try:
+                cls = await classify_card(card, config)
+                result["category"] = cls["primary"]
+                category_subdir = cls["primary"]
+            except Exception:
+                result["category"] = "其他"
+                category_subdir = "其他"
 
         # Analyse before
         analysis_before = analyse_card(card)
@@ -93,8 +107,8 @@ async def process_one(
         # Skip if no risk detected (unless force rewrite)
         if analysis_before.overall_risk == 0 and not force_rewrite:
             result["status"] = "skipped"
-            # Still copy to output
-            _write_output(card, file_bytes, filepath, output_dir, output_format)
+            _write_output(card, file_bytes, filepath, output_dir, output_format,
+                          category=category_subdir)
             return result
 
         # Detect language and rewrite in the same language
@@ -114,7 +128,8 @@ async def process_one(
         result["risk_after"] = analysis_after.overall_risk
 
         # Write output
-        _write_output(card, file_bytes, filepath, output_dir, output_format)
+        _write_output(card, file_bytes, filepath, output_dir, output_format,
+                      category=category_subdir)
 
     except Exception as e:
         result["status"] = "error"
@@ -123,20 +138,43 @@ async def process_one(
     return result
 
 
+def _sanitize_filename(name: str) -> str:
+    """Sanitize a string for use as a filename."""
+    # Remove or replace characters that are problematic in filenames
+    import re
+    name = re.sub(r'[<>:"/\\|?*]', '', name)
+    name = name.strip('. ')
+    # Truncate to reasonable length
+    if len(name) > 80:
+        name = name[:80].rstrip()
+    return name or "unnamed"
+
+
 def _write_output(
     card: CharacterCard,
     original_bytes: bytes,
     original_path: Path,
     output_dir: Path,
     output_format: str,
-    suffix: str = "_washed",
+    suffix: str = "",
+    category: str = "",
 ):
-    stem = original_path.stem
+    # Build output directory (with optional category subdirectory)
+    target_dir = output_dir / category if category else output_dir
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    # Use the card's (possibly rewritten) name as the filename
+    card_name = getattr(card.data, 'name', '') or ''
+    if card_name:
+        stem = _sanitize_filename(card_name)
+    else:
+        stem = original_path.stem
+
     if output_format == "png" and original_path.suffix.lower() == ".png":
-        out_path = output_dir / f"{stem}{suffix}.png"
+        out_path = target_dir / f"{stem}{suffix}.png"
         out_bytes = write_card_to_png(card, original_bytes)
     else:
-        out_path = output_dir / f"{stem}{suffix}.json"
+        out_path = target_dir / f"{stem}{suffix}.json"
         out_bytes = write_card_to_json(card)
     out_path.write_bytes(out_bytes)
 
@@ -268,15 +306,16 @@ async def batch_process(args: argparse.Namespace):
 
         log("▶", f"{prefix} {fp.name} ...", C.BLUE)
 
-        res = await process_one(fp, output_dir, config, strength, selected_fields, args.format, args.force_rewrite)
+        res = await process_one(fp, output_dir, config, strength, selected_fields, args.format, args.force_rewrite, args.categorize)
         results.append(res)
 
+        cat_tag = f"  [{res['category']}]" if res.get("category") else ""
         if res["status"] == "ok":
             risk_arrow = f"{res['risk_before']} → {res['risk_after']}"
             color = C.GREEN if res["risk_after"] < res["risk_before"] else C.YELLOW
-            log("✓", f"{prefix} {fp.name}  风险: {color}{risk_arrow}{C.RESET}  改写 {res['fields_rewritten']} 个字段", C.GREEN)
+            log("✓", f"{prefix} {fp.name}{cat_tag}  风险: {color}{risk_arrow}{C.RESET}  改写 {res['fields_rewritten']} 个字段", C.GREEN)
         elif res["status"] == "skipped":
-            log("○", f"{prefix} {fp.name}  无风险，已复制", C.DIM)
+            log("○", f"{prefix} {fp.name}{cat_tag}  无风险，已复制", C.DIM)
         elif res["status"] == "error":
             log("✗", f"{prefix} {fp.name}  {C.RED}错误: {res['error']}{C.RESET}", C.RED)
 
@@ -461,6 +500,7 @@ def main():
     parser.add_argument("--delay", type=float, default=1.0, help="每个文件之间的延迟秒数 (默认: 1.0)")
     parser.add_argument("--force", action="store_true", help="强制覆盖已存在的输出文件")
     parser.add_argument("--force-rewrite", action="store_true", help="强制清洗所有卡（即使风险评分为 0）")
+    parser.add_argument("--categorize", action="store_true", help="按题材自动分类到子目录（冒险/纯爱/奇幻...）")
     parser.add_argument("--translate", default="", metavar="LANG", help="翻译模式: 目标语言 zh/en/ja (例: --translate en)")
 
     args = parser.parse_args()

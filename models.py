@@ -125,6 +125,14 @@ class CharacterCard(BaseModel):
             "data": self.data.model_dump(exclude_none=True),
         }
 
+    def to_native_dict(self) -> dict[str, Any]:
+        """Export preserving the original spec version (v2 or v3)."""
+        return {
+            "spec": self.spec,
+            "spec_version": self.spec_version,
+            "data": self.data.model_dump(exclude_none=True),
+        }
+
     # ── field access shortcuts ────────────────────────────────────────────
 
     @property

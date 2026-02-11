@@ -17,6 +17,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import uuid
 import zipfile
 from typing import Any, Optional
@@ -36,10 +37,12 @@ from card_io import (
 )
 from models import CharacterCard
 from rewriter import (
+    CARD_CATEGORIES,
     LLMConfig,
     LLMProvider,
     RewriteStrength,
     apply_rewrite,
+    classify_card,
     rewrite_card,
     translate_card,
 )
@@ -260,6 +263,62 @@ async def translate_card_endpoint(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Classify
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+@app.get("/api/categories")
+async def get_categories():
+    """Return available card categories."""
+    return {"categories": CARD_CATEGORIES}
+
+
+@app.post("/api/classify")
+async def classify_card_endpoint(
+    session_id: str = Form(...),
+    provider: str = Form(""),
+    api_key: str = Form(""),
+    model: str = Form(""),
+    base_url: Optional[str] = Form(None),
+):
+    """Classify a card by genre/theme using LLM."""
+    session = _sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    card: CharacterCard = session["card"]
+
+    actual_provider = provider or _DEFAULT_PROVIDER or "openai"
+    actual_key = api_key or _DEFAULT_API_KEY
+    actual_model = model or _DEFAULT_MODEL or "gpt-4o-mini"
+    actual_base_url = base_url or _DEFAULT_BASE_URL or None
+
+    if not actual_key:
+        raise HTTPException(status_code=400, detail="No API key provided and no default key configured.")
+
+    try:
+        llm_provider = LLMProvider(actual_provider)
+    except ValueError:
+        llm_provider = LLMProvider.OPENAI_COMPATIBLE
+
+    config = LLMConfig(
+        provider=llm_provider,
+        api_key=actual_key,
+        model=actual_model,
+        base_url=actual_base_url,
+        temperature=0.2,
+    )
+
+    try:
+        result = await classify_card(card, config)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Classification failed: {e}")
+
+    session["classification"] = result
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  Apply
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -311,7 +370,7 @@ async def export_json(session_id: str = Form(...)):
     return Response(
         content=json_bytes,
         media_type="application/json",
-        headers={"Content-Disposition": f'attachment; filename="{name}_washed.json"'},
+        headers={"Content-Disposition": f'attachment; filename="{name}.json"'},
     )
 
 
@@ -336,7 +395,7 @@ async def export_png(session_id: str = Form(...)):
     return Response(
         content=png_bytes,
         media_type="image/png",
-        headers={"Content-Disposition": f'attachment; filename="{name}_washed.png"'},
+        headers={"Content-Disposition": f'attachment; filename="{name}.png"'},
     )
 
 
@@ -528,10 +587,73 @@ async def batch_rewrite(
     return {"batch_id": batch_id, "results": results}
 
 
+@app.post("/api/batch/classify")
+async def batch_classify(
+    batch_id: str = Form(...),
+    provider: str = Form(""),
+    api_key: str = Form(""),
+    model: str = Form(""),
+    base_url: Optional[str] = Form(None),
+):
+    """Classify all cards in a batch by genre/theme."""
+    batch = _batches.get(batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+
+    actual_provider = provider or _DEFAULT_PROVIDER or "openai"
+    actual_key = api_key or _DEFAULT_API_KEY
+    actual_model = model or _DEFAULT_MODEL or "gpt-4o-mini"
+    actual_base_url = base_url or _DEFAULT_BASE_URL or None
+
+    if not actual_key:
+        raise HTTPException(status_code=400, detail="No API key provided.")
+
+    try:
+        llm_provider = LLMProvider(actual_provider)
+    except ValueError:
+        llm_provider = LLMProvider.OPENAI_COMPATIBLE
+
+    config = LLMConfig(
+        provider=llm_provider,
+        api_key=actual_key,
+        model=actual_model,
+        base_url=actual_base_url,
+        temperature=0.2,
+    )
+
+    results = []
+    for item in batch["items"]:
+        if item["card"] is None:
+            results.append({
+                "id": item["id"],
+                "filename": item["filename"],
+                "classification": None,
+            })
+            continue
+
+        try:
+            cls_result = await classify_card(item["card"], config)
+            item["classification"] = cls_result
+            results.append({
+                "id": item["id"],
+                "filename": item["filename"],
+                "classification": cls_result,
+            })
+        except Exception as e:
+            results.append({
+                "id": item["id"],
+                "filename": item["filename"],
+                "classification": {"primary": "其他", "secondary": [], "reason": str(e)},
+            })
+
+    return {"batch_id": batch_id, "results": results}
+
+
 @app.post("/api/batch/export")
 async def batch_export(
     batch_id: str = Form(...),
     format: str = Form("json"),  # "json" or "png"
+    categorize: bool = Form(False),  # group into category subdirectories
 ):
     """Export all successfully processed batch cards as a ZIP file."""
     batch = _batches.get(batch_id)
@@ -545,14 +667,25 @@ async def batch_export(
                 continue
 
             card: CharacterCard = item["card"]
-            stem = item["filename"].rsplit(".", 1)[0]
+            # Use card's (possibly rewritten) name as filename
+            card_name = getattr(card.data, 'name', '') or ''
+            if card_name:
+                stem = re.sub(r'[<>:"/\\|?*]', '', card_name).strip('. ')[:80] or 'unnamed'
+            else:
+                stem = item["filename"].rsplit(".", 1)[0]
+
+            # Determine subdirectory
+            subdir = ""
+            if categorize:
+                cls = item.get("classification")
+                subdir = (cls["primary"] if cls else "其他") + "/"
 
             if format == "png" and item["original_png"]:
                 out_bytes = write_card_to_png(card, item["original_png"])
-                zf.writestr(f"{stem}_washed.png", out_bytes)
+                zf.writestr(f"{subdir}{stem}.png", out_bytes)
             else:
                 out_bytes = write_card_to_json(card)
-                zf.writestr(f"{stem}_washed.json", out_bytes)
+                zf.writestr(f"{subdir}{stem}.json", out_bytes)
 
     buf.seek(0)
     return Response(

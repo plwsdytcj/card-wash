@@ -884,6 +884,35 @@ async function startBatchRewrite() {
       }
     }
 
+    // If categorize is checked, classify all cards
+    const wantCategorize = $('#batchCategorize').checked;
+    if (wantCategorize) {
+      $('#batchProgress').textContent = '分类中...';
+      try {
+        const clsForm = new FormData();
+        clsForm.append('batch_id', batchState.batchId);
+        clsForm.append('provider', $('#batchProvider').value);
+        clsForm.append('api_key', apiKey);
+        clsForm.append('model', $('#batchModel').value);
+        clsForm.append('base_url', $('#batchBaseUrl')?.value || '');
+        const clsRes = await fetch(`${API}/api/batch/classify`, { method: 'POST', body: clsForm });
+        if (clsRes.ok) {
+          const clsData = await clsRes.json();
+          // Merge classification into results
+          for (const cr of clsData.results) {
+            const r = data.results.find(x => x.id === cr.id);
+            if (r && cr.classification) {
+              r.category = cr.classification.primary;
+              r.secondary = cr.classification.secondary;
+            }
+          }
+        }
+      } catch (clsErr) {
+        console.warn('Classification failed:', clsErr);
+      }
+    }
+    batchState.categorized = wantCategorize;
+
     renderBatchResults(data.results);
     toast('批量改写完成！', 'success');
   } catch (e) {
@@ -917,8 +946,13 @@ function renderBatchResults(results) {
          <span class="batch-result-risk" style="color:${riskColor(r.risk_after)}">${r.risk_after}</span>`
       : '<span class="batch-result-risk" style="color:var(--text-muted)">—</span>';
 
+    const catHtml = r.category
+      ? `<span class="batch-result-category">${r.category}</span>${(r.secondary||[]).map(s => `<span class="batch-result-category secondary">${s}</span>`).join('')}`
+      : '';
+
     el.innerHTML = `
       <span class="batch-result-name">${r.filename}</span>
+      <div class="batch-result-tags">${catHtml}</div>
       <div style="display:flex;align-items:center;gap:0.3rem">${riskHtml}</div>
       <span class="batch-result-status ${statusClass}">${statusText}</span>
     `;
@@ -941,6 +975,7 @@ async function doBatchExport(format) {
   const form = new FormData();
   form.append('batch_id', batchState.batchId);
   form.append('format', format);
+  form.append('categorize', batchState.categorized ? 'true' : 'false');
 
   try {
     const res = await fetch(`${API}/api/batch/export`, { method: 'POST', body: form });
