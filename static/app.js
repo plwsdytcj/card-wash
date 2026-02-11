@@ -55,10 +55,11 @@ const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => document.querySelectorAll(sel);
 
 const pages = {
-  upload:  $('#page-upload'),
-  analyze: $('#page-analyze'),
-  rewrite: $('#page-rewrite'),
-  export:  $('#page-export'),
+  upload:    $('#page-upload'),
+  analyze:   $('#page-analyze'),
+  rewrite:   $('#page-rewrite'),
+  translate: $('#page-translate'),
+  export:    $('#page-export'),
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -70,22 +71,39 @@ function goToPage(name) {
   pages[name].classList.add('active');
 
   $$('.steps-nav .step').forEach(btn => {
-    const s = btn.dataset.step;
-    btn.classList.remove('active');
+    btn.classList.remove('active', 'done');
     btn.disabled = true;
-    if (s === name) {
-      btn.classList.add('active');
-      btn.disabled = false;
-    }
   });
 
-  // Enable previous steps
-  const order = ['upload', 'analyze', 'rewrite', 'export'];
-  const idx = order.indexOf(name);
-  for (let i = 0; i <= idx; i++) {
-    const btn = $(`.step[data-step="${order[i]}"]`);
-    btn.disabled = false;
-    if (i < idx) btn.classList.add('done');
+  // Determine which steps to enable depending on current path
+  // Both 'rewrite' and 'translate' are branches from 'analyze'
+  const isTranslatePath = (name === 'translate') || (name === 'export' && state._lastPath === 'translate');
+  if (name === 'translate' || name === 'rewrite') state._lastPath = name;
+
+  const basePath = ['upload', 'analyze'];
+  const branchStep = isTranslatePath ? 'translate' : 'rewrite';
+
+  // Enable base steps + the chosen branch + export if at export
+  const stepsToEnable = [...basePath, branchStep];
+  if (name === 'export') stepsToEnable.push('export');
+
+  stepsToEnable.forEach(s => {
+    const btn = $(`.step[data-step="${s}"]`);
+    if (btn) btn.disabled = false;
+  });
+
+  // Mark active
+  const activeBtn = $(`.step[data-step="${name}"]`);
+  if (activeBtn) {
+    activeBtn.classList.add('active');
+    activeBtn.disabled = false;
+  }
+
+  // Mark preceding steps as done
+  const currentIdx = stepsToEnable.indexOf(name);
+  for (let i = 0; i < currentIdx; i++) {
+    const btn = $(`.step[data-step="${stepsToEnable[i]}"]`);
+    if (btn) btn.classList.add('done');
   }
 }
 
@@ -954,20 +972,20 @@ $('#batchStartOver').addEventListener('click', () => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  TRANSLATE MODE
+//  TRANSLATE PAGE
 // ═══════════════════════════════════════════════════════════════════════════
 
 const LANG_DISPLAY = { zh: '中文', en: 'English', ja: '日本語' };
 
+// Navigate to the translate page
 $('#goToTranslate').addEventListener('click', () => {
-  const modal = $('#translateModal');
   const detected = state.analysis?.detected_language || 'zh';
 
   // Set source language display
-  $('#translateFromLang').textContent = LANG_DISPLAY[detected] || detected;
+  $('#trFromLang').textContent = LANG_DISPLAY[detected] || detected;
 
   // Set target options — remove source lang from choices
-  const sel = $('#translateTargetLang');
+  const sel = $('#trTargetLang');
   sel.innerHTML = '';
   for (const [code, name] of Object.entries(LANG_DISPLAY)) {
     if (code !== detected) {
@@ -978,48 +996,61 @@ $('#goToTranslate').addEventListener('click', () => {
     }
   }
 
-  // Auto-fill from server config
-  const tprov = $('#translateProvider');
-  const tmodel = $('#translateModel');
-  const tbase = $('#translateBaseUrl');
-  const tkey = $('#translateApiKey');
-  // Inherit from single-mode fields if filled
-  if ($('#llmProvider').value) tprov.value = $('#llmProvider').value;
-  if ($('#llmModel').value) tmodel.value = tmodel.value || $('#llmModel').value;
-  if ($('#llmBaseUrl').value) tbase.value = tbase.value || $('#llmBaseUrl').value;
-  if ($('#llmApiKey').value) tkey.value = tkey.value || $('#llmApiKey').value;
+  // Populate field checkboxes
+  renderTranslateFieldCheckboxes();
 
-  modal.style.display = 'flex';
+  // Inherit LLM config from rewrite page if filled
+  if ($('#llmProvider').value) $('#trProvider').value = $('#llmProvider').value;
+  if ($('#llmModel').value && !$('#trModel').value) $('#trModel').value = $('#llmModel').value;
+  if ($('#llmBaseUrl').value && !$('#trBaseUrl').value) $('#trBaseUrl').value = $('#llmBaseUrl').value;
+  if ($('#llmApiKey').value && !$('#trApiKey').value) $('#trApiKey').value = $('#llmApiKey').value;
+
+  // Reset diff panel
+  $('#translateDiffContainer').innerHTML = '<div class="diff-placeholder">配置左侧参数后点击「开始翻译」</div>';
+
+  goToPage('translate');
 });
 
-$('#translateCancel').addEventListener('click', () => {
-  $('#translateModal').style.display = 'none';
+function renderTranslateFieldCheckboxes() {
+  const container = $('#trFieldCheckboxes');
+  container.innerHTML = '';
+  const fields = state.rewritableFields || [];
+  for (const fname of fields) {
+    const label = document.createElement('label');
+    label.className = 'field-checkbox';
+    label.innerHTML = `<input type="checkbox" value="${fname}" checked /><span>${fname}</span>`;
+    container.appendChild(label);
+  }
+}
+
+$('#trProvider').addEventListener('change', (e) => {
+  $('#trBaseUrlGroup').style.display = e.target.value === 'openai_compatible' ? 'block' : 'none';
 });
 
-$('#translateModal').addEventListener('click', (e) => {
-  if (e.target === e.currentTarget) $('#translateModal').style.display = 'none';
+$('#trTemp').addEventListener('input', (e) => {
+  $('#trTempValue').textContent = e.target.value;
 });
 
-$('#translateProvider').addEventListener('change', (e) => {
-  $('#translateBaseUrlGroup').style.display = e.target.value === 'openai_compatible' ? 'block' : 'none';
-});
-
-$('#translateStart').addEventListener('click', startTranslate);
+$('#startTranslate').addEventListener('click', startTranslate);
 
 async function startTranslate() {
-  const targetLang = $('#translateTargetLang').value;
+  const targetLang = $('#trTargetLang').value;
+
+  // Collect selected fields
+  const checks = $('#trFieldCheckboxes').querySelectorAll('input:checked');
+  const selectedFields = Array.from(checks).map(c => c.value);
 
   const form = new FormData();
   form.append('session_id', state.sessionId);
-  form.append('provider', $('#translateProvider').value);
-  form.append('api_key', $('#translateApiKey').value.trim());
-  form.append('model', $('#translateModel').value.trim());
-  form.append('base_url', $('#translateBaseUrl')?.value || '');
+  form.append('provider', $('#trProvider').value);
+  form.append('api_key', $('#trApiKey').value.trim());
+  form.append('model', $('#trModel').value.trim());
+  form.append('base_url', $('#trBaseUrl')?.value || '');
   form.append('target_lang', targetLang);
-  form.append('selected_fields', '');  // all fields
-  form.append('temperature', '0.3');
+  form.append('selected_fields', selectedFields.join(','));
+  form.append('temperature', $('#trTemp').value);
 
-  $('#translateStart').disabled = true;
+  $('#startTranslate').disabled = true;
   $('#translateLoading').style.display = 'flex';
 
   try {
@@ -1030,7 +1061,7 @@ async function startTranslate() {
     }
     const data = await res.json();
 
-    // Apply translated fields as if they were rewritten
+    // Store result for apply/export
     state.rewriteResult = {
       original: data.original,
       rewritten: data.translated,
@@ -1040,15 +1071,84 @@ async function startTranslate() {
       state.acceptedFields[key] = 'accept';
     }
 
-    // Close modal, go to rewrite page to show diff
-    $('#translateModal').style.display = 'none';
-    renderDiff();
-    goToPage('rewrite');
+    // Render diff in the translate page
+    renderTranslateDiff(data);
     toast(`翻译完成！${LANG_DISPLAY[data.source_lang]} → ${LANG_DISPLAY[data.target_lang]}`, 'success');
   } catch (e) {
     toast(`翻译失败: ${e.message}`, 'error');
   } finally {
-    $('#translateStart').disabled = false;
+    $('#startTranslate').disabled = false;
     $('#translateLoading').style.display = 'none';
   }
 }
+
+function renderTranslateDiff(data) {
+  const container = $('#translateDiffContainer');
+  container.innerHTML = '';
+
+  const orig = data.original;
+  const translated = data.translated;
+  const srcLabel = LANG_DISPLAY[data.source_lang] || data.source_lang;
+  const tgtLabel = LANG_DISPLAY[data.target_lang] || data.target_lang;
+
+  for (const key of Object.keys(translated)) {
+    const card = document.createElement('div');
+    card.className = 'diff-card';
+    card.innerHTML = `
+      <div class="diff-card-header">
+        <span class="diff-field-name">${key}</span>
+        <span class="diff-lang-tag">${srcLabel} → ${tgtLabel}</span>
+      </div>
+      <div class="diff-columns">
+        <div class="diff-col diff-old">
+          <div class="diff-col-label">原文 (${srcLabel})</div>
+          <div class="diff-col-text">${escapeHtml(orig[key] || '').slice(0, 800)}${(orig[key]||'').length > 800 ? '…' : ''}</div>
+        </div>
+        <div class="diff-col diff-new">
+          <div class="diff-col-label">译文 (${tgtLabel})</div>
+          <textarea class="diff-col-textarea" data-field="${key}">${escapeHtml(translated[key] || '')}</textarea>
+        </div>
+      </div>
+    `;
+    container.appendChild(card);
+  }
+
+  // Add apply button at the bottom
+  const actions = document.createElement('div');
+  actions.className = 'diff-actions';
+  actions.innerHTML = `
+    <button class="btn btn-accent btn-lg" id="applyTranslate">
+      <svg viewBox="0 0 20 20" fill="currentColor" width="18" height="18"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"/></svg>
+      应用翻译并导出
+    </button>
+  `;
+  container.appendChild(actions);
+
+  actions.querySelector('#applyTranslate').addEventListener('click', async () => {
+    // Collect possibly edited translations from textareas
+    const textareas = container.querySelectorAll('.diff-col-textarea');
+    const finalFields = {};
+    textareas.forEach(ta => {
+      finalFields[ta.dataset.field] = ta.value;
+    });
+
+    try {
+      const form = new FormData();
+      form.append('session_id', state.sessionId);
+      form.append('rewritten_fields', JSON.stringify(finalFields));
+      const res = await fetch(`${API}/api/apply`, { method: 'POST', body: form });
+      if (!res.ok) throw new Error((await res.json()).detail);
+      const result = await res.json();
+
+      state.card = result.card;
+      state.analysis = result.analysis;
+      renderExport();
+      goToPage('export');
+      toast('翻译已应用！', 'success');
+    } catch (e) {
+      toast(`应用失败: ${e.message}`, 'error');
+    }
+  });
+}
+
+// escapeHtml is defined earlier in the file
