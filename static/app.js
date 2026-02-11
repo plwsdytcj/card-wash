@@ -96,8 +96,8 @@ fileInput.addEventListener('change', () => {
 
 async function handleFile(file) {
   const ext = file.name.split('.').pop().toLowerCase();
-  if (!['png', 'json'].includes(ext)) {
-    toast('仅支持 .png 和 .json 文件', 'error');
+  if (!['png', 'webp', 'charx', 'json'].includes(ext)) {
+    toast('仅支持 .png / .webp / .charx / .json 文件', 'error');
     return;
   }
 
@@ -253,10 +253,13 @@ function renderRewriteConfig() {
     fieldAnalysisMap[f.field_name] = f;
   }
 
+  const forceMode = $('#forceRewrite').checked;
+
   for (const fname of state.rewritableFields) {
     const fa = fieldAnalysisMap[fname];
     const score = fa ? fa.risk_score : 0;
-    const checked = score >= 2 ? 'checked' : '';  // auto-select risky fields
+    // In force mode, auto-select all; otherwise only risky fields
+    const checked = forceMode || score >= 2 ? 'checked' : '';
     const label = document.createElement('label');
     label.className = 'field-checkbox';
     label.innerHTML = `
@@ -267,6 +270,16 @@ function renderRewriteConfig() {
     container.appendChild(label);
   }
 }
+
+// Force rewrite toggle: re-render field checkboxes when toggled
+document.addEventListener('DOMContentLoaded', () => {
+  const forceEl = $('#forceRewrite');
+  if (forceEl) {
+    forceEl.addEventListener('change', () => {
+      if (state.rewritableFields.length) renderRewriteConfig();
+    });
+  }
+});
 
 // Provider change → show/hide base URL
 $('#llmProvider').addEventListener('change', (e) => {
@@ -593,10 +606,10 @@ batchFileInput.addEventListener('change', () => {
 async function handleBatchFiles(fileList) {
   const files = [...fileList].filter(f => {
     const ext = f.name.split('.').pop().toLowerCase();
-    return ['png', 'json'].includes(ext);
+    return ['png', 'webp', 'charx', 'json'].includes(ext);
   });
   if (!files.length) {
-    toast('没有有效的 .png / .json 文件', 'error');
+    toast('没有有效的 .png / .webp / .charx / .json 文件', 'error');
     return;
   }
 
@@ -697,6 +710,7 @@ async function startBatchRewrite() {
   form.append('strength', batchState.strength);
   form.append('selected_fields', '');  // all fields
   form.append('temperature', $('#batchTemp').value);
+  form.append('force', $('#batchForceRewrite').checked ? 'true' : 'false');
 
   $('#startBatchRewrite').disabled = true;
   $('#batchLoading').style.display = 'flex';

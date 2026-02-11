@@ -1,9 +1,11 @@
 """
-Read / write SillyTavern character cards from PNG (tEXt chunk) and JSON files.
+Read / write SillyTavern character cards from PNG, WebP, CHARX, and JSON.
 
-PNG character cards embed a base64-encoded JSON blob inside a ``tEXt`` chunk
-with keyword ``chara``.  This module handles the low-level binary parsing so
-the rest of the app never has to worry about it.
+PNG / APNG read/write is delegated to **card-forge** (``forge.helper``):
+  • ``extract_card_data``  – reads ``ccv3`` / ``chara`` tEXt chunks
+  • ``embed_card_data``    – writes both ``ccv3`` + ``chara`` (legacy=True)
+
+WebP / CHARX / JSON are handled natively (card-forge doesn't cover these).
 """
 
 from __future__ import annotations
@@ -11,96 +13,165 @@ from __future__ import annotations
 import base64
 import io
 import json
-import struct
-import zlib
+import tempfile
+import zipfile
 from pathlib import Path
 from typing import Any
+
+from forge.helper import embed_card_data, extract_card_data
 
 from models import CharacterCard
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  PNG chunk-level helpers
-# ═══════════════════════════════════════════════════════════════════════════════
-
-PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-
-
-def _read_chunks(data: bytes) -> list[dict[str, Any]]:
-    """Parse *data* into a list of ``{type, data}`` dicts (raw PNG chunks)."""
-    if data[:8] != PNG_SIGNATURE:
-        raise ValueError("Not a valid PNG file")
-    chunks: list[dict[str, Any]] = []
-    pos = 8
-    while pos < len(data):
-        length = struct.unpack(">I", data[pos : pos + 4])[0]
-        chunk_type = data[pos + 4 : pos + 8].decode("ascii")
-        chunk_data = data[pos + 8 : pos + 8 + length]
-        # skip CRC (4 bytes)
-        pos += 12 + length
-        chunks.append({"type": chunk_type, "data": chunk_data})
-    return chunks
-
-
-def _make_chunk(chunk_type: str, chunk_data: bytes) -> bytes:
-    """Build a single PNG chunk (length + type + data + CRC)."""
-    raw_type = chunk_type.encode("ascii")
-    crc = zlib.crc32(raw_type + chunk_data) & 0xFFFFFFFF
-    return (
-        struct.pack(">I", len(chunk_data))
-        + raw_type
-        + chunk_data
-        + struct.pack(">I", crc)
-    )
-
-
-def _encode_chunks(chunks: list[dict[str, Any]]) -> bytes:
-    """Reassemble a list of chunk dicts back into a full PNG byte string."""
-    parts = [PNG_SIGNATURE]
-    for c in chunks:
-        parts.append(_make_chunk(c["type"], c["data"]))
-    return b"".join(parts)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  tEXt chunk helpers
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-def _decode_text_chunk(data: bytes) -> tuple[str, str]:
-    """Decode a ``tEXt`` chunk into (keyword, text)."""
-    sep = data.index(b"\x00")
-    keyword = data[:sep].decode("latin-1")
-    text = data[sep + 1 :].decode("latin-1")
-    return keyword, text
-
-
-def _encode_text_chunk(keyword: str, text: str) -> bytes:
-    """Encode a ``tEXt`` chunk from (keyword, text)."""
-    return keyword.encode("latin-1") + b"\x00" + text.encode("latin-1")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Public API
+#  PNG read / write  (via card-forge)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
 def read_card_from_png(data: bytes) -> CharacterCard:
     """
-    Extract a CharacterCard from raw PNG bytes.
+    Extract a CharacterCard from raw PNG / APNG bytes using card-forge.
 
-    Looks for a ``tEXt`` chunk with keyword ``chara``, base64-decodes the
-    value, then parses the resulting JSON.
+    card-forge's ``extract_card_data`` handles ccv3 vs chara priority and
+    v2 → v3 upgrade automatically.
     """
-    chunks = _read_chunks(data)
-    for c in chunks:
-        if c["type"] == "tEXt":
-            kw, txt = _decode_text_chunk(c["data"])
-            if kw == "chara":
-                json_str = base64.b64decode(txt).decode("utf-8")
-                raw = json.loads(json_str)
-                return CharacterCard.from_dict(raw)
-    raise ValueError("PNG does not contain a 'chara' tEXt chunk")
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+
+    try:
+        card_v3 = extract_card_data(tmp_path)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+    if card_v3 is None:
+        raise ValueError(
+            "PNG does not contain a 'chara' or 'ccv3' tEXt chunk"
+        )
+
+    # Convert forge's CharacterCardV3 → our CharacterCard
+    raw = card_v3.model_dump()
+    return CharacterCard.from_dict(raw)
+
+
+def write_card_to_png(card: CharacterCard, original_png: bytes) -> bytes:
+    """
+    Inject the card JSON back into *original_png* using card-forge.
+
+    Writes both ``ccv3`` (v3) and ``chara`` (v2 legacy) tEXt chunks via
+    card-forge's ``embed_card_data(legacy=True)``.
+    """
+    v2_dict = card.to_v2_dict()
+    metadata_json = json.dumps(v2_dict, ensure_ascii=False)
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as src:
+        src.write(original_png)
+        src_path = src.name
+
+    out_path = src_path + "_out.png"
+
+    try:
+        embed_card_data(metadata_json, src_path, out_path, legacy=True)
+        result = Path(out_path).read_bytes()
+    finally:
+        Path(src_path).unlink(missing_ok=True)
+        Path(out_path).unlink(missing_ok=True)
+
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  WebP read
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def read_card_from_webp(data: bytes) -> CharacterCard:
+    """
+    Extract character data from a WebP file's EXIF UserComment field.
+
+    Many community tools (Chub, RisuAI, etc.) store the card JSON in the
+    EXIF UserComment tag, either as raw UTF-8 or with the EXIF "UNICODE\\0"
+    / "ASCII\\0\\0\\0" prefix.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        raise ImportError(
+            "Pillow is required for WebP support. Install it with: "
+            "pip install Pillow"
+        )
+
+    img = Image.open(io.BytesIO(data))
+    exif = img.getexif()
+
+    # UserComment tag = 0x9286 (37510)
+    user_comment_tag = 0x9286
+    raw_comment: bytes | str | None = None
+
+    # Try main EXIF
+    if user_comment_tag in exif:
+        raw_comment = exif[user_comment_tag]
+    else:
+        # Try EXIF IFD
+        for ifd_tag in exif.get_ifd(0x8769) or {}:
+            if ifd_tag == user_comment_tag:
+                raw_comment = exif.get_ifd(0x8769)[ifd_tag]
+                break
+
+    if raw_comment is None:
+        raise ValueError("WebP does not contain EXIF UserComment data")
+
+    # Decode
+    if isinstance(raw_comment, bytes):
+        # Strip EXIF encoding prefix if present
+        # "ASCII\x00\x00\x00" (8 bytes) or "UNICODE\x00" (8 bytes)
+        if raw_comment[:8] in (b"ASCII\x00\x00\x00", b"UNICODE\x00"):
+            raw_comment = raw_comment[8:]
+        text = raw_comment.decode("utf-8", errors="replace")
+    else:
+        text = str(raw_comment)
+
+    text = text.strip().strip("\x00")
+
+    # The data might be base64-encoded or raw JSON
+    if text.startswith("{"):
+        raw = json.loads(text)
+    else:
+        try:
+            decoded = base64.b64decode(text).decode("utf-8")
+            raw = json.loads(decoded)
+        except Exception:
+            raw = json.loads(text)
+
+    return CharacterCard.from_dict(raw)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  CHARX read
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def read_card_from_charx(data: bytes) -> CharacterCard:
+    """
+    Extract character data from a ``.charx`` file (ZIP containing
+    ``card.json`` at the root).
+    """
+    buf = io.BytesIO(data)
+    try:
+        with zipfile.ZipFile(buf, "r") as zf:
+            if "card.json" not in zf.namelist():
+                raise ValueError("CHARX archive does not contain card.json")
+            card_json = zf.read("card.json").decode("utf-8")
+    except zipfile.BadZipFile:
+        raise ValueError("File is not a valid CHARX (ZIP) archive")
+
+    raw = json.loads(card_json)
+    return CharacterCard.from_dict(raw)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  JSON read
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def read_card_from_json(data: bytes | str) -> CharacterCard:
@@ -110,58 +181,54 @@ def read_card_from_json(data: bytes | str) -> CharacterCard:
     return CharacterCard.from_dict(raw)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Unified read
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
 def read_card(file_bytes: bytes, filename: str) -> CharacterCard:
     """Auto-detect format by extension and read."""
     ext = Path(filename).suffix.lower()
     if ext == ".png":
         return read_card_from_png(file_bytes)
-    elif ext in (".json",):
+    elif ext == ".webp":
+        return read_card_from_webp(file_bytes)
+    elif ext == ".charx":
+        return read_card_from_charx(file_bytes)
+    elif ext == ".json":
         return read_card_from_json(file_bytes)
     else:
-        # Try PNG first, fall back to JSON
-        try:
-            return read_card_from_png(file_bytes)
-        except Exception:
-            return read_card_from_json(file_bytes)
+        # Try formats in order: PNG → WebP → CHARX → JSON
+        for reader in (
+            read_card_from_png,
+            read_card_from_webp,
+            read_card_from_charx,
+            read_card_from_json,
+        ):
+            try:
+                return reader(file_bytes)
+            except Exception:
+                continue
+        raise ValueError(f"Could not parse card from '{filename}'")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Write helpers
+# ═══════════════════════════════════════════════════════════════════════════════
 
 
 def write_card_to_json(card: CharacterCard) -> bytes:
     """Serialise a CharacterCard to pretty-printed JSON bytes."""
-    return json.dumps(card.to_v2_dict(), ensure_ascii=False, indent=2).encode("utf-8")
-
-
-def write_card_to_png(card: CharacterCard, original_png: bytes) -> bytes:
-    """
-    Inject the card JSON back into *original_png* as a ``tEXt`` ``chara``
-    chunk, replacing the old one if present.
-
-    The image data itself is preserved byte-for-byte.
-    """
-    chunks = _read_chunks(original_png)
-
-    # Remove any existing 'chara' tEXt chunks
-    new_chunks: list[dict[str, Any]] = []
-    for c in chunks:
-        if c["type"] == "tEXt":
-            kw, _ = _decode_text_chunk(c["data"])
-            if kw == "chara":
-                continue
-        new_chunks.append(c)
-
-    # Build new chara chunk
-    json_bytes = json.dumps(card.to_v2_dict(), ensure_ascii=False).encode("utf-8")
-    b64_text = base64.b64encode(json_bytes).decode("latin-1")
-    chara_data = _encode_text_chunk("chara", b64_text)
-
-    # Insert right before IEND
-    iend_idx = next(
-        (i for i, c in enumerate(new_chunks) if c["type"] == "IEND"), len(new_chunks)
-    )
-    new_chunks.insert(iend_idx, {"type": "tEXt", "data": chara_data})
-
-    return _encode_chunks(new_chunks)
+    return json.dumps(
+        card.to_v2_dict(), ensure_ascii=False, indent=2
+    ).encode("utf-8")
 
 
 def extract_avatar_from_png(data: bytes) -> str:
     """Return a ``data:image/png;base64,...`` data-URI from PNG bytes."""
     return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+
+
+def extract_avatar_from_webp(data: bytes) -> str:
+    """Return a ``data:image/webp;base64,...`` data-URI from WebP bytes."""
+    return "data:image/webp;base64," + base64.b64encode(data).decode("ascii")

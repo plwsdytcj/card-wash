@@ -18,25 +18,31 @@ class LorebookEntry(BaseModel):
     extensions: dict[str, Any] = Field(default_factory=dict)
     enabled: bool = True
     insertion_order: int = 0
-    case_sensitive: bool = False
-    name: str = ""
-    priority: int = 10
-    id: int = 0
+    case_sensitive: Optional[bool] = False
+    name: Optional[str] = ""
+    priority: Optional[int] = 10
+    id: Optional[int] = 0
     comment: str = ""
     selective: bool = False
     secondary_keys: list[str] = Field(default_factory=list)
     constant: bool = False
-    position: str = "before_char"
+    position: Optional[str] = "before_char"
+
+    class Config:
+        extra = "allow"
 
 
 class Lorebook(BaseModel):
     entries: list[LorebookEntry] = Field(default_factory=list)
-    name: str = ""
-    description: str = ""
-    scan_depth: int = 2
-    token_budget: int = 500
-    recursive_scanning: bool = False
+    name: Optional[str] = ""
+    description: Optional[str] = ""
+    scan_depth: Optional[int] = 2
+    token_budget: Optional[int] = 500
+    recursive_scanning: Optional[bool] = False
     extensions: dict[str, Any] = Field(default_factory=dict)
+
+    class Config:
+        extra = "allow"
 
 
 # ── Character Card Data (v2 inner) ──────────────────────────────────────────

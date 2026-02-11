@@ -73,10 +73,10 @@
       </svg>
     </div>
     <h2>拖放角色卡到这里</h2>
-    <p>支持 <strong>.png</strong> (含嵌入数据) 和 <strong>.json</strong> 格式</p>
+    <p>支持 <strong>.png</strong> / <strong>.webp</strong> (含嵌入数据)、<strong>.charx</strong> 和 <strong>.json</strong> 格式</p>
     <label class="upload-btn">
       选择文件
-      <input type="file" id="fileInput" accept=".png,.json" hidden />
+      <input type="file" id="fileInput" accept=".png,.webp,.charx,.json" hidden />
     </label>
   </div>
 
@@ -90,10 +90,10 @@
       </svg>
     </div>
     <h2>拖放多个角色卡到这里</h2>
-    <p>支持同时上传多个 <strong>.png</strong> 和 <strong>.json</strong> 文件</p>
+    <p>支持同时上传多个 <strong>.png</strong> / <strong>.webp</strong> / <strong>.charx</strong> / <strong>.json</strong> 文件</p>
     <label class="upload-btn">
       选择文件（可多选）
-      <input type="file" id="batchFileInput" accept=".png,.json" multiple hidden />
+      <input type="file" id="batchFileInput" accept=".png,.webp,.charx,.json" multiple hidden />
     </label>
   </div>
 
@@ -141,6 +141,11 @@
           <input type="range" id="batchTemp" class="form-range" min="0" max="1.5" step="0.1" value="0.7" />
         </div>
       </div>
+
+      <label class="force-rewrite-toggle">
+        <input type="checkbox" id="batchForceRewrite" />
+        <span>强制清洗（即使风险为 0 也改写）</span>
+      </label>
 
       <div class="batch-actions">
         <button class="btn btn-primary btn-lg" id="startBatchRewrite">
@@ -259,6 +264,11 @@
 
       <label class="form-label">Temperature <span id="tempValue">0.7</span></label>
       <input type="range" id="llmTemp" class="form-range" min="0" max="1.5" step="0.1" value="0.7" />
+
+      <label class="force-rewrite-toggle">
+        <input type="checkbox" id="forceRewrite" />
+        <span>强制清洗（即使风险为 0 也改写）</span>
+      </label>
 
       <button class="btn btn-primary btn-lg" id="startRewrite" style="margin-top:1.5rem;width:100%">
         开始改写

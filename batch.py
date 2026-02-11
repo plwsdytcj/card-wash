@@ -69,6 +69,7 @@ async def process_one(
     strength: RewriteStrength,
     selected_fields: list[str] | None,
     output_format: str,
+    force_rewrite: bool = False,
 ) -> dict:
     """Process a single card file. Returns a result dict."""
     result = {
@@ -88,8 +89,8 @@ async def process_one(
         analysis_before = analyse_card(card)
         result["risk_before"] = analysis_before.overall_risk
 
-        # Skip if no risk detected
-        if analysis_before.overall_risk == 0:
+        # Skip if no risk detected (unless force rewrite)
+        if analysis_before.overall_risk == 0 and not force_rewrite:
             result["status"] = "skipped"
             # Still copy to output
             _write_output(card, file_bytes, filepath, output_dir, output_format)
@@ -146,11 +147,12 @@ async def batch_process(args: argparse.Namespace):
     # Collect files
     files = sorted([
         f for f in input_dir.iterdir()
-        if f.suffix.lower() in (".png", ".json") and not f.name.startswith(".")
+        if f.suffix.lower() in (".png", ".webp", ".charx", ".json")
+        and not f.name.startswith(".")
     ])
 
     if not files:
-        log("!", f"在 {input_dir} 中没有找到 .png 或 .json 文件", C.YELLOW)
+        log("!", f"在 {input_dir} 中没有找到 .png / .webp / .charx / .json 文件", C.YELLOW)
         return
 
     header(f"Card Wash 批量处理 — {len(files)} 个文件")
@@ -214,7 +216,7 @@ async def batch_process(args: argparse.Namespace):
 
         log("▶", f"{prefix} {fp.name} ...", C.BLUE)
 
-        res = await process_one(fp, output_dir, config, strength, selected_fields, args.format)
+        res = await process_one(fp, output_dir, config, strength, selected_fields, args.format, args.force_rewrite)
         results.append(res)
 
         if res["status"] == "ok":
@@ -305,6 +307,7 @@ def main():
     parser.add_argument("--format", default="same", choices=["same", "png", "json"], help="输出格式: same=保持原格式, png, json (默认: same)")
     parser.add_argument("--delay", type=float, default=1.0, help="每个文件之间的延迟秒数 (默认: 1.0)")
     parser.add_argument("--force", action="store_true", help="强制覆盖已存在的输出文件")
+    parser.add_argument("--force-rewrite", action="store_true", help="强制清洗所有卡（即使风险评分为 0）")
 
     args = parser.parse_args()
 

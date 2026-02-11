@@ -924,3 +924,32 @@ body {
   justify-content: center;
   margin-bottom: 0.5rem;
 }
+
+/* Force rewrite toggle */
+.force-rewrite-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  padding: 0.6rem 0.8rem;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  transition: border-color 0.2s, background 0.2s;
+}
+.force-rewrite-toggle:hover {
+  border-color: var(--accent);
+}
+.force-rewrite-toggle input[type="checkbox"] {
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+.force-rewrite-toggle input[type="checkbox"]:checked + span {
+  color: var(--accent);
+  font-weight: 500;
+}

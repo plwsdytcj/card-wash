@@ -28,6 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from analyzer import analyse_card
 from card_io import (
     extract_avatar_from_png,
+    extract_avatar_from_webp,
     read_card,
     write_card_to_json,
     write_card_to_png,
@@ -74,16 +75,19 @@ async def upload_card(file: UploadFile = File(...)):
     # Run analysis
     analysis = analyse_card(card)
 
-    # Extract avatar if PNG
+    # Extract avatar
     avatar = ""
-    if filename.lower().endswith(".png"):
+    fname_lower = filename.lower()
+    if fname_lower.endswith(".png"):
         avatar = extract_avatar_from_png(contents)
+    elif fname_lower.endswith(".webp"):
+        avatar = extract_avatar_from_webp(contents)
 
     # Store session
     session_id = uuid.uuid4().hex[:12]
     _sessions[session_id] = {
         "card": card,
-        "original_png": contents if filename.lower().endswith(".png") else None,
+        "original_png": contents if fname_lower.endswith(".png") else None,
         "avatar": avatar,
         "detected_language": analysis.detected_language,
     }
@@ -262,14 +266,17 @@ async def batch_upload(files: list[UploadFile] = File(...)):
             card = read_card(contents, filename)
             analysis = analyse_card(card)
             avatar = ""
-            if filename.lower().endswith(".png"):
+            fn_lower = filename.lower()
+            if fn_lower.endswith(".png"):
                 avatar = extract_avatar_from_png(contents)
+            elif fn_lower.endswith(".webp"):
+                avatar = extract_avatar_from_webp(contents)
 
             items.append({
                 "id": item_id,
                 "filename": filename,
                 "card": card,
-                "original_png": contents if filename.lower().endswith(".png") else None,
+                "original_png": contents if fn_lower.endswith(".png") else None,
                 "avatar": avatar,
                 "analysis": analysis,
                 "status": "ready",
@@ -322,6 +329,7 @@ async def batch_rewrite(
     strength: str = Form("medium"),
     selected_fields: str = Form(""),
     temperature: float = Form(0.7),
+    force: bool = Form(False),
 ):
     """Rewrite all cards in a batch sequentially."""
     batch = _batches.get(batch_id)
@@ -368,8 +376,8 @@ async def batch_rewrite(
         analysis_before = item["analysis"]
         risk_before = analysis_before.overall_risk if analysis_before else 0
 
-        # Skip cards with no risk
-        if risk_before == 0:
+        # Skip cards with no risk (unless force mode)
+        if risk_before == 0 and not force:
             results.append({
                 "id": item["id"],
                 "filename": item["filename"],
